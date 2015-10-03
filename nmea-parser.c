@@ -60,8 +60,56 @@ static inline int parse_status(char *status)
 	return (status[0] == 'A');
 }
 
-static void parse_lat(char *deg, struct gps_info *info)
+static void parse_lat(char *data, struct gps_info *info)
 {
+	int i,j;
+	int len = strlen(data);
+	double mins = 0;
+	unsigned mul = 1, storemul;
+	unsigned degs = 0;
+
+	for(i=len-1;;i--)
+		if (data[i] == '.')
+			break;
+
+	i -=2;
+
+	mins = strtod(&data[i], NULL);
+	printf("mins in str = %s\n", (char*)&data[i]);
+	printf("mins %lf \n", mins);
+
+	data[i] = '\0';
+	printf("degs in str = %s\n", data);
+	degs = strtol(data, NULL);
+	printf("Degs %d \n", degs);
+
+/*	
+	for(i=len-1;; i--) {
+		if (data[i] == '.') {
+			mins += (data[--i] - '0')*mul;
+			mul *=10;
+			mins += (data[--i] - '0')*mul;
+			break;
+		}
+		mins += (data[i] - '0')*mul;
+		mul *= 10;
+	}
+
+	mins = mins/mul;
+	mins = mins/60;
+	storemul = mul;
+
+	mul = 1;
+	for(j=i-1; j>=0; j--) {
+		degs += (data[j] - '0')*mul;
+		mul = mul*10;
+	}
+
+	degs = degs + mins;
+	degs = degs*storemul;
+	printf("STORE DEgs = %d and factor=%d\n", (unsigned)degs , storemul);
+*/
+
 }
 
 static inline void parse_lat_direction(char *dir, struct gps_info *info)
@@ -109,6 +157,7 @@ static int parse(char *line)
 			break;
 		case PARSE_LONGT:
 			printf("token = %s\n", token);
+			parse_lat(token, &info);
 			break;
 		case PARSE_LONGT_DIR:
 			printf("token = %s\n", token);
