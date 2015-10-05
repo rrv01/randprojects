@@ -1,9 +1,13 @@
 #include <stdio.h>
 #include <string.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
 
 #define MAX_LINE_LENGTH 82
-#define GPRMC_CMD "$GPRMC"
-#define GPRMC_CMD_LEN 6
+#define GPRMC_CMD "GPRMC"
+#define GPRMC_CMD_LEN 5
 #define GPS_ACTIVE 'A'
 #define PARSE_TIME 2
 #define PARSE_STATUS 3
@@ -80,7 +84,7 @@ static void parse_lat(char *data, struct gps_info *info)
 
 	data[i] = '\0';
 	printf("degs in str = %s\n", data);
-	degs = strtol(data, NULL);
+	degs = strtol(data, NULL, 10);
 	printf("Degs %d \n", degs);
 
 /*	
@@ -124,14 +128,38 @@ static inline void parse_longt_direction(char *dir, struct gps_info *info)
 		info->longt *= -1;
 }
 
-static int parse(char *line)
+struct token_data {
+	char line[MAX_LINE_LENGTH];
+	int calc_checksum;
+	int order;
+	char org_checksum[3];
+};
+
+static inline int verify_checksum(struct token_data *data)
+{
+	long org_checksum = strtol(data->org_checksum, NULL, 16);
+
+	printf("Calc checksum = %d and org_checksum=%ld\n", data->calc_checksum, org_checksum);
+	return (data->calc_checksum != org_checksum);
+}
+
+static void *parse_line(void *data)
 {
 	struct gps_info info;
-	int parse_field=0;
+	int parse_field = 0;
 	char *token, *saveptr;
-	char *sentence = line;
+	struct token_data *tdata = data;
+	char *sentence = tdata->line;
+
+	if (verify_checksum(tdata))
+		goto out;
 
 	token = strtok_r(sentence, ",\n", &saveptr);
+
+	if (strncmp(token,GPRMC_CMD, GPRMC_CMD_LEN))
+		goto out;
+
+	printf("CMD parsing done\n");
 	parse_field++;
 	while(token != NULL) {
 		token = strtok_r(NULL, ",\n", &saveptr);
@@ -145,7 +173,7 @@ static int parse(char *line)
 		case PARSE_STATUS:
 			printf("token = %s\n", token);
 			if(!parse_status(token))
-				return -1;
+				goto out;
 			break;
 		case PARSE_LAT:
 			printf("token = %s\n", token);
@@ -166,52 +194,69 @@ static int parse(char *line)
 	}
 
 	/* Write to file */
-	return 0;
+out:
+	pthread_exit(NULL);
+	return NULL;
 }
 
-static int verify_checksum(char *line)
-{
-	unsigned checksum_calc=0, org_checksum=1;
-	int i;
-
-	for(i=1; (line[i] && line[i]!='*' && i < MAX_LINE_LENGTH); i++)
-		checksum_calc ^= line[i];
-
-	if (line[i] == '*')
-		org_checksum = strtol(&line[i+1],NULL,16);
-
-//	printf("Calc checksum = %d and org_checksum=%d\n", checksum_calc, org_checksum);
-	return (checksum_calc == org_checksum);
-}
-
-			
 int main()
 
 {
-	char line[MAX_LINE_LENGTH];
-	char *token;
-	char *saveptr;
-	char *curr_line = line;
-	int parse_line = 0;
-	unsigned done_count;
+	char line[MAX_LINE_LENGTH] = {0};
+	char c;
+	long calc_checksum = 0;
+	int done = 0;
+	int count = 0;
+	int i;
+	char str_checksum[3] = {0};
+	pthread_t th;
+        static struct termios oldt, newt;
 
-	while (fgets(line, MAX_LINE_LENGTH, stdin)) {
-		if (!strncmp(line, GPRMC_CMD, GPRMC_CMD_LEN)) {
-			if (!verify_checksum(line)) {
-				//printf("checksum failed \n");				
-				continue;
-			} else {
-				//printf("checksum passed\n");
-			}
+        /*tcgetattr gets the parameters of the current terminal
+        STDIN_FILENO will tell tcgetattr that it should write the settings
+        of stdin to oldt*/
+        tcgetattr(STDIN_FILENO, &oldt);
+        /*now the settings will be copied*/
+        newt = oldt;
 
-			/* Assuming all data is valid from this point on */
-			parse(line);
-			if (++done_count == 100) {
-		//		close_file();
-				return 0;
-			}
+        /*ICANON normally takes care that one line at a time will be processed
+        that means it will return if it sees a "\n" or an EOF or an EOL*/
+        newt.c_lflag &= ~(ICANON);          
+
+        /*Those new settings will be set to STDIN
+        TCSANOW tells tcsetattr to change attributes immediately. */
+        tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+	while ((c = getchar()) != '\n' && c!='\r') {
+//		printf("got char %c\n",c);
+		if (c == '$') {
+			i = 0;
+			calc_checksum = 0;
+			done = 0;
+			continue;
+		}
+		line[i++] = c;
+		if (c == '*') {
+			str_checksum[0] = getchar();
+			str_checksum[1] = getchar();
+			done = 1;
+		} else {
+			calc_checksum ^= c;
+		}
+		if (done) {
+			struct token_data *token = malloc(sizeof(struct token_data));
+			strncpy(token->line, line, MAX_LINE_LENGTH);
+			strncpy(token->org_checksum, str_checksum, 3);
+			token->calc_checksum = calc_checksum;
+			token->order = count;
+			pthread_create(&th, NULL, parse_line, token);
+			count++;
+			done = 0;
+			printf("thread created \n");
 		}	
 	}
 
+	tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+	pthread_exit(NULL);
 	return 0;
 }
