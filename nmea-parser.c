@@ -4,7 +4,9 @@
 #include <stdlib.h>
 #include <termios.h>
 #include <unistd.h>
+#include <errno.h>
 
+#define MAX_OUTPUT_GPS_LINES 100
 #define MAX_LINE_LENGTH 82
 #define GPRMC_CMD "GPRMC"
 #define GPRMC_CMD_LEN 5
@@ -18,9 +20,7 @@
 
 /*
 RMC - NMEA has its own version of essential gps pvt (position, velocity, time) data. It is called RMC, The Recommended Minimum, which will look similar to:
-
 $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
-
 Where:
      RMC          Recommended Minimum sentence C
      123519       Fix taken at 12:35:19 UTC
@@ -34,99 +34,32 @@ Where:
      *6A          The checksum data, always begins with *
 */
 
+#ifdef DEBUG
+#define pr_debug printf
+#else
+#define pr_debug
+#endif
+
+#ifdef PRINFO
+#define pr_info printf
+#else
+#define pr_info
+#endif
+
+FILE *fp;
+int order_num, lines_written;
+pthread_mutex_t cond_var_lock = PTHREAD_MUTEX_INITIALIZER; 
+pthread_cond_t cond_var = PTHREAD_COND_INITIALIZER;
+
 struct gps_info {
-	struct time {
-		unsigned hours;
-		unsigned mins;
-		unsigned secs;
-	}time;
+	unsigned hours;
+	unsigned mins;
+	unsigned secs;
 	int lat;
 	unsigned lat_factor;
 	int longt;
 	unsigned longt_factor;
 };
-
-//printf("token = %s\n", token);
-/* for (token=curr_line; token != NULL; curr_line = NULL) {
-			token = strtok_r(curr_line, ",\n", &saveptr);
-
-*/
-
-static void parse_time(char *time, struct gps_info *info)
-{
-	info->time.hours = (time[0] - '0')*10 + (time[1] - '0'); 
-	info->time.mins = (time[2] - '0')*10 + (time[3] - '0'); 
-	info->time.secs = (time[4] - '0')*10 + (time[5] - '0'); 
-}
-
-static inline int parse_status(char *status)
-{
-	return (status[0] == 'A');
-}
-
-static void parse_lat(char *data, struct gps_info *info)
-{
-	int i,j;
-	int len = strlen(data);
-	double mins = 0;
-	unsigned mul = 1, storemul;
-	unsigned degs = 0;
-
-	for(i=len-1;;i--)
-		if (data[i] == '.')
-			break;
-
-	i -=2;
-
-	mins = strtod(&data[i], NULL);
-	printf("mins in str = %s\n", (char*)&data[i]);
-	printf("mins %lf \n", mins);
-
-	data[i] = '\0';
-	printf("degs in str = %s\n", data);
-	degs = strtol(data, NULL, 10);
-	printf("Degs %d \n", degs);
-
-/*	
-	for(i=len-1;; i--) {
-		if (data[i] == '.') {
-			mins += (data[--i] - '0')*mul;
-			mul *=10;
-			mins += (data[--i] - '0')*mul;
-			break;
-		}
-		mins += (data[i] - '0')*mul;
-		mul *= 10;
-	}
-
-	mins = mins/mul;
-	mins = mins/60;
-	storemul = mul;
-
-	mul = 1;
-	for(j=i-1; j>=0; j--) {
-		degs += (data[j] - '0')*mul;
-		mul = mul*10;
-	}
-
-	degs = degs + mins;
-	degs = degs*storemul;
-	printf("STORE DEgs = %d and factor=%d\n", (unsigned)degs , storemul);
-*/
-
-}
-
-static inline void parse_lat_direction(char *dir, struct gps_info *info)
-{
-	if (dir[0] == 'S')
-		info->lat *= -1;
-}
-
-static inline void parse_longt_direction(char *dir, struct gps_info *info)
-{
-	if (dir[0] == 'W')
-		info->longt *= -1;
-}
 
 struct token_data {
 	char line[MAX_LINE_LENGTH];
@@ -135,12 +68,78 @@ struct token_data {
 	char org_checksum[3];
 };
 
+static inline void parse_time(char *time, struct gps_info *info)
+{
+	info->hours = (time[0] - '0')*10 + (time[1] - '0'); 
+	info->mins = (time[2] - '0')*10 + (time[3] - '0'); 
+	info->secs = (time[4] - '0')*10 + (time[5] - '0'); 
+	pr_debug("Time calc as %d:%d:%d\n", info->hours, info->mins, info->secs);
+}
+
+static inline int parse_status(char *status)
+{
+	return (status[0] == 'A');
+}
+
+static void parse_degrees(char *data, struct gps_info *info, int param)
+{
+	int i,j;
+	int len = strlen(data);
+	double mins = 0, val;
+	int degs = 0, final;
+	int mul = 0;
+	char str_mins[10] = {0};
+	int pow10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000,
+			10000000, 100000000, 1000000000};
+
+	val = strtod(data, NULL);
+	degs = val / 100;
+	pr_debug("Degs %d \n", degs);
+
+	mins = (val - degs*100) / 60;
+	pr_debug("Mins %lf \n", mins);
+
+	sprintf(str_mins,"%lf",mins);
+	mul = strlen(str_mins) - 2;
+
+	val = (degs+mins) * pow10[mul];
+	final = (int)val;
+
+	pr_debug("val = %lf final val %d mul %d \n", val, final, mul);
+
+	switch (param) {
+		case PARSE_LAT:
+			info->lat = final;
+			info->lat_factor = pow10[mul];
+			break;
+		case PARSE_LONGT:
+			info->longt = final;
+			info->longt_factor = pow10[mul];
+			break;
+	}
+}
+
+static inline void parse_direction(char *dir, struct gps_info *info, int param)
+{
+	switch(param) {
+	case PARSE_LAT_DIR:
+		if (dir[0] == 'S')
+			info->lat *= -1;
+		break;
+	case PARSE_LONGT_DIR:
+		if (dir[0] == 'W') {
+			info->longt *= -1;
+		}
+		break;
+	}
+}
+
 static inline int verify_checksum(struct token_data *data)
 {
 	long org_checksum = strtol(data->org_checksum, NULL, 16);
 
-	printf("Calc checksum = %d and org_checksum=%ld\n", data->calc_checksum, org_checksum);
-	return (data->calc_checksum != org_checksum);
+	pr_debug("Calc checksum = %d and org_checksum=%ld\n", data->calc_checksum, org_checksum);
+	return (data->calc_checksum == org_checksum);
 }
 
 static void *parse_line(void *data)
@@ -150,16 +149,18 @@ static void *parse_line(void *data)
 	char *token, *saveptr;
 	struct token_data *tdata = data;
 	char *sentence = tdata->line;
+	char output[35] = {0};
+	int valid_data = 0;
 
-	if (verify_checksum(tdata))
+	if (!verify_checksum(tdata))
 		goto out;
 
 	token = strtok_r(sentence, ",\n", &saveptr);
 
-	if (strncmp(token,GPRMC_CMD, GPRMC_CMD_LEN))
+	if (strncmp(token, GPRMC_CMD, GPRMC_CMD_LEN))
 		goto out;
 
-	printf("CMD parsing done\n");
+	pr_debug("CMD parsing done\n");
 	parse_field++;
 	while(token != NULL) {
 		token = strtok_r(NULL, ",\n", &saveptr);
@@ -168,67 +169,85 @@ static void *parse_line(void *data)
 		switch (parse_field) {
 		case PARSE_TIME:
 			parse_time(token, &info);
-			printf("token = %s\n", token);
+			pr_debug("token = %s\n", token);
 			break;
 		case PARSE_STATUS:
-			printf("token = %s\n", token);
+			pr_debug("token = %s\n", token);
 			if(!parse_status(token))
 				goto out;
 			break;
 		case PARSE_LAT:
-			printf("token = %s\n", token);
-			parse_lat(token, &info);
+			pr_debug("token = %s\n", token);
+			parse_degrees(token, &info, PARSE_LAT);
 			break;
 		case PARSE_LAT_DIR:
-			printf("token = %s\n", token);
-			parse_lat_direction(token, &info);
+			pr_debug("token = %s\n", token);
+			parse_direction(token, &info, PARSE_LAT_DIR);
 			break;
 		case PARSE_LONGT:
-			printf("token = %s\n", token);
-			parse_lat(token, &info);
+			pr_debug("token = %s\n", token);
+			parse_degrees(token, &info, PARSE_LONGT);
 			break;
 		case PARSE_LONGT_DIR:
-			printf("token = %s\n", token);
+			pr_debug("token = %s\n", token);
+			parse_direction(token, &info, PARSE_LONGT_DIR);
+			valid_data = 1;
 			break;
 		}
 	}
 
 	/* Write to file */
 out:
+	pthread_mutex_lock(&cond_var_lock);
+	while (order_num != tdata->order)
+		pthread_cond_wait(&cond_var, &cond_var_lock);
+
+	if (valid_data) {
+		fprintf(fp,"%d:%d:%d,%lf,%lf\n",info.hours,info.mins,info.secs,
+			info.lat*1.0/info.lat_factor, info.longt*1.0/info.longt_factor);
+		fsync(fileno(fp));
+		pr_info("\nline_written to file %d\n", order_num);
+		lines_written++;
+	} else {
+		pr_info("\nINVALID data skipped order %d\n",tdata->order);
+	}
+	
+	order_num++;
+	if (lines_written == MAX_OUTPUT_GPS_LINES) {
+		fclose(fp);
+		pr_info("DONE FP CLOSED\n");
+	}
+	pthread_cond_broadcast(&cond_var);
+	pthread_mutex_unlock(&cond_var_lock);
+
+	free(tdata->line);
 	pthread_exit(NULL);
 	return NULL;
 }
 
 int main()
-
 {
 	char line[MAX_LINE_LENGTH] = {0};
 	char c;
 	long calc_checksum = 0;
-	int done = 0;
-	int count = 0;
+	int done = 0, count = 0, ret = 0;
 	int i;
 	char str_checksum[3] = {0};
-	pthread_t th;
         static struct termios oldt, newt;
+	pthread_t th;
 
-        /*tcgetattr gets the parameters of the current terminal
-        STDIN_FILENO will tell tcgetattr that it should write the settings
-        of stdin to oldt*/
+	fp = fopen("gps_output_data.txt", "w");
+	if (!fp) {
+		printf("Error: Cannot open gps_output_data.txt for writing : %s\n", strerror(errno));
+		return -EINVAL;
+	}
+
         tcgetattr(STDIN_FILENO, &oldt);
-        /*now the settings will be copied*/
         newt = oldt;
-
-        /*ICANON normally takes care that one line at a time will be processed
-        that means it will return if it sees a "\n" or an EOF or an EOL*/
         newt.c_lflag &= ~(ICANON);          
-
-        /*Those new settings will be set to STDIN
-        TCSANOW tells tcsetattr to change attributes immediately. */
         tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
 	while ((c = getchar()) != '\n' && c!='\r') {
-//		printf("got char %c\n",c);
 		if (c == '$') {
 			i = 0;
 			calc_checksum = 0;
@@ -245,6 +264,11 @@ int main()
 		}
 		if (done) {
 			struct token_data *token = malloc(sizeof(struct token_data));
+			if (!token) {
+				printf("Error: Could not allocate memory for token\n");
+				ret = -ENOMEM;
+				goto out_done;
+			}
 			strncpy(token->line, line, MAX_LINE_LENGTH);
 			strncpy(token->org_checksum, str_checksum, 3);
 			token->calc_checksum = calc_checksum;
@@ -252,11 +276,14 @@ int main()
 			pthread_create(&th, NULL, parse_line, token);
 			count++;
 			done = 0;
-			printf("thread created \n");
+			pr_debug("Thread created %d\n", count);
 		}	
+		if (lines_written == MAX_OUTPUT_GPS_LINES)
+			goto out_done;
 	}
 
+out_done:
 	tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
 	pthread_exit(NULL);
-	return 0;
+	return ret;
 }
