@@ -1,0 +1,39 @@
+Rohit's GPS-GPRMC Parser
+
+From the NMEA protocol description, the details for the GPRMC statement are:
+
+GPRMC - NMEA has its own version of essential gps pvt (position, velocity, time) data.
+It is called RMC, The Recommended Minimum, which will look similar to:
+$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
+Where:
+     RMC          Recommended Minimum sentence C
+     123519       Fix taken at 12:35:19 UTC
+     A            Status A=active or V=Void.
+     4807.038,N   Latitude 48 deg 07.038' N
+     01131.000,E  Longitude 11 deg 31.000' E
+     022.4        Speed over the ground in knots
+     084.4        Track angle in degrees True
+     230394       Date - 23rd of March 1994
+     003.1,W      Magnetic Variation
+     *6A          The checksum data, always begins with *
+
+
+Usage:
+The parser accepts a stream of input characters at STDIN.
+cat input_gps_data.txt | ./parser
+
+For simplicity, here are a couple of minor assumptions and usage behavior:
+1. Required input is a continuous stream of characters.
+	a) Any '\n' or '\r' will terminate the parser at the input.
+2. Currently, input is accepted on STDIN *only*.
+3. Output is stored in current directory in a file named "gps_output_data.txt"
+4. Easiest way to run the parser is to pipe the input stream to parser as shown above.
+6. A sample input file with random GPS data has been included.
+
+Inner Specifics:
+1. The parser continuously accepts character to form a complete sentence.
+2. It then creates a new thread that parses the single statement and writes it to file if the data is valid.
+3. Writes to the file are synchronized. This ensures that there are multiple threads parsing different lines
+in parallel to the main thread that just does io-read. The thread exits after writing to the file.
+4. The parser will quit after it has parsed and written MAX_GPS_OUTPUT_LINES lines. This is set to 100.
+5. Use #define DEBUG to print debug messages while the parser is running.

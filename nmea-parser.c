@@ -6,8 +6,8 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define MAX_OUTPUT_GPS_LINES 100
 #define MAX_LINE_LENGTH 82
+#define MAX_OUTPUT_GPS_LINES 100
 #define GPRMC_CMD "GPRMC"
 #define GPRMC_CMD_LEN 5
 #define GPS_ACTIVE 'A'
@@ -18,32 +18,10 @@
 #define PARSE_LONGT 6
 #define PARSE_LONGT_DIR 7
 
-/*
-RMC - NMEA has its own version of essential gps pvt (position, velocity, time) data. It is called RMC, The Recommended Minimum, which will look similar to:
-$GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A
-Where:
-     RMC          Recommended Minimum sentence C
-     123519       Fix taken at 12:35:19 UTC
-     A            Status A=active or V=Void.
-     4807.038,N   Latitude 48 deg 07.038' N
-     01131.000,E  Longitude 11 deg 31.000' E
-     022.4        Speed over the ground in knots
-     084.4        Track angle in degrees True
-     230394       Date - 23rd of March 1994
-     003.1,W      Magnetic Variation
-     *6A          The checksum data, always begins with *
-*/
-
 #ifdef DEBUG
 #define pr_debug printf
 #else
 #define pr_debug
-#endif
-
-#ifdef PRINFO
-#define pr_info printf
-#else
-#define pr_info
 #endif
 
 FILE *fp;
@@ -86,7 +64,7 @@ static void parse_degrees(char *data, struct gps_info *info, int param)
 	int i,j;
 	int len = strlen(data);
 	double mins = 0, val;
-	int degs = 0, final;
+	int degs = 0, final_val;
 	int mul = 0;
 	char str_mins[10] = {0};
 	int pow10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000,
@@ -102,18 +80,18 @@ static void parse_degrees(char *data, struct gps_info *info, int param)
 	sprintf(str_mins,"%lf",mins);
 	mul = strlen(str_mins) - 2;
 
-	val = (degs+mins) * pow10[mul];
-	final = (int)val;
+	val = (degs + mins) * pow10[mul];
+	final_val = (int)val;
 
-	pr_debug("val = %lf final val %d mul %d \n", val, final, mul);
+	pr_debug("val = %lf final val %d mul %d \n", val, final_val, mul);
 
 	switch (param) {
 		case PARSE_LAT:
-			info->lat = final;
+			info->lat = final_val;
 			info->lat_factor = pow10[mul];
 			break;
 		case PARSE_LONGT:
-			info->longt = final;
+			info->longt = final_val;
 			info->longt_factor = pow10[mul];
 			break;
 	}
@@ -122,14 +100,13 @@ static void parse_degrees(char *data, struct gps_info *info, int param)
 static inline void parse_direction(char *dir, struct gps_info *info, int param)
 {
 	switch(param) {
-	case PARSE_LAT_DIR:
-		if (dir[0] == 'S')
-			info->lat *= -1;
+		case PARSE_LAT_DIR:
+			if (dir[0] == 'S')
+				info->lat *= -1;
 		break;
-	case PARSE_LONGT_DIR:
-		if (dir[0] == 'W') {
-			info->longt *= -1;
-		}
+		case PARSE_LONGT_DIR:
+			if (dir[0] == 'W')
+				info->longt *= -1;
 		break;
 	}
 }
@@ -169,27 +146,27 @@ static void *parse_line(void *data)
 		switch (parse_field) {
 		case PARSE_TIME:
 			parse_time(token, &info);
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse time token = %s\n", token);
 			break;
 		case PARSE_STATUS:
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse Status token = %s\n", token);
 			if(!parse_status(token))
 				goto out;
 			break;
 		case PARSE_LAT:
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse Lat token = %s\n", token);
 			parse_degrees(token, &info, PARSE_LAT);
 			break;
 		case PARSE_LAT_DIR:
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse lat-dir token = %s\n", token);
 			parse_direction(token, &info, PARSE_LAT_DIR);
 			break;
 		case PARSE_LONGT:
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse longt token = %s\n", token);
 			parse_degrees(token, &info, PARSE_LONGT);
 			break;
 		case PARSE_LONGT_DIR:
-			pr_debug("token = %s\n", token);
+			pr_debug("Parse longt-dir token = %s\n", token);
 			parse_direction(token, &info, PARSE_LONGT_DIR);
 			valid_data = 1;
 			break;
@@ -206,16 +183,16 @@ out:
 		fprintf(fp,"%d:%d:%d,%lf,%lf\n",info.hours,info.mins,info.secs,
 			info.lat*1.0/info.lat_factor, info.longt*1.0/info.longt_factor);
 		fsync(fileno(fp));
-		pr_info("\nline_written to file %d\n", order_num);
+		pr_debug("\nLine written to file %d\n", order_num);
 		lines_written++;
 	} else {
-		pr_info("\nINVALID data skipped order %d\n",tdata->order);
+		pr_debug("\nINVALID data skipped order %d\n", tdata->order);
 	}
 	
 	order_num++;
 	if (lines_written == MAX_OUTPUT_GPS_LINES) {
 		fclose(fp);
-		pr_info("DONE FP CLOSED\n");
+		printf("Done: All Data written\n");
 	}
 	pthread_cond_broadcast(&cond_var);
 	pthread_mutex_unlock(&cond_var_lock);
@@ -254,7 +231,8 @@ int main()
 			done = 0;
 			continue;
 		}
-		line[i++] = c;
+		if (i < MAX_LINE_LENGTH)
+			line[i++] = c;
 		if (c == '*') {
 			str_checksum[0] = getchar();
 			str_checksum[1] = getchar();
