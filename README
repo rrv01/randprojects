@@ -18,10 +18,6 @@ Where:
      *6A          The checksum data, always begins with *
 
 
-Usage:
-The parser accepts a stream of input characters at STDIN.
-cat input_gps_data.txt | ./parser
-
 For simplicity, here are a couple of minor assumptions and usage behavior:
 1. Required input is a continuous stream of characters.
 	a) Any '\n' or '\r' will terminate the parser at the input.
@@ -29,6 +25,14 @@ For simplicity, here are a couple of minor assumptions and usage behavior:
 3. Output is stored in current directory in a file named "gps_output_data.txt"
 4. Easiest way to run the parser is to pipe the input stream to parser as shown above.
 6. A sample input file with random GPS data has been included.
+	The sample input data has just been picked up from random internet links.
+
+Usage:
+The parser accepts a stream of input characters at STDIN.
+make
+cat input_gps_data.txt | ./parser
+
+Use #define DEBUG to print debug messages to STDOUT while the parser is running.
 
 Inner Specifics:
 1. The parser continuously accepts character to form a complete sentence.
